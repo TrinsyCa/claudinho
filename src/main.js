@@ -10,9 +10,10 @@ import atualizador from "electron-updater";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { t, usaIdioma, nomeIdioma, idioma, detectaIdioma } from "./i18n-main.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -38,11 +39,40 @@ function chaveApi() {
   if (!config.chaveApi) return "";
   try { return safeStorage.decryptString(Buffer.from(config.chaveApi, "base64")); } catch { return ""; }
 }
+// Claude Code's process for the SDK. On Windows Node sometimes can't start
+// reading the child's stdout pipe (read ENOTCONN); the SDK listens for errors
+// on stdin and stderr but not on stdout, so that one error took down the whole
+// main process. Here a broken pipe ends the child; the SDK then fails that
+// query with the pipe's error, which the turn shows in the window.
+function abreClaude({ command, args, cwd, env, signal }) {
+  const filho = spawn(command, args, { cwd, env, signal, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  let erro = "", falhou = false;
+  const falha = (e) => {
+    if (falhou) return;
+    falhou = true;
+    console.log("[claude] falhou:", e?.code || e?.message || e);
+    try { filho.kill(); } catch {}
+  };
+  filho.stdin.on("error", () => {});
+  filho.stdout.on("error", falha);
+  filho.stderr.on("error", falha);
+  filho.stderr.on("data", (d) => { erro = (erro + d).slice(-2000); });
+  filho.once("exit", (codigo) => {
+    if (!codigo || !erro.trim()) return;
+    console.log("[claude] saiu com", codigo + ":", erro.trim());
+    ultimoStderr = { texto: erro.trim().split(/\r?\n/).slice(-6).join("\n"), quando: Date.now() };
+  });
+  return filho;
+}
+// what the last Claude Code that failed wrote to stderr, for the error the
+// window shows when its process exits (only if it is from the last seconds)
+let ultimoStderr = { texto: "", quando: 0 };
+const stderrRecente = () => (Date.now() - ultimoStderr.quando < 15000 ? "\n" + ultimoStderr.texto : "");
 // every query goes through here: the person's Claude Code and the chosen sign-in
 function query(args) {
   const exe = acharClaude();
-  if (!exe && !temClaudeEmbutido()) throw new Error("Não encontrei o Claude Code neste computador. Instale em code.claude.com/docs/en/setup e abra o Claudinho de novo.");
-  const extra = {};
+  if (!exe && !temClaudeEmbutido()) throw new Error(t("Não encontrei o Claude Code neste computador. Instale em code.claude.com/docs/en/setup e abra o Claudinho de novo."));
+  const extra = { spawnClaudeCodeProcess: abreClaude };
   if (exe) extra.pathToClaudeCodeExecutable = exe;
   const chave = config.entrar === "chave" ? chaveApi() : "";
   if (chave) extra.env = { ...process.env, ANTHROPIC_API_KEY: chave };
@@ -79,6 +109,8 @@ function buscaMagia(busca = "", categoria = "") {
 }
 
 let config = { cwd: path.join(app.getPath("home"), "projetos"), model: "", modo: "default", esforco: "" };
+// The language the window chose (config.idioma), or the system's until it says.
+usaIdioma(() => (["pt", "en", "tr"].includes(config.idioma) ? config.idioma : detectaIdioma(app.isReady() ? app.getLocale() : "")));
 // Each window holds its own conversation: the session it shows and the turn
 // running in it ({ q, ac }). The settings and the project folder are shared.
 const janelas = new Map();   // webContents id -> { win, sessionId, atual, cwd }
@@ -103,9 +135,9 @@ const enviarEvento = (j, ev) => {
 // The themes, as tools Claude can call: suggest one (a card with Aplicar and
 // Prévia in the chat) or apply one right away. The same for the pieces of the
 // ASCII Magic library, which Claude searches first.
-const texto = (t) => ({ content: [{ type: "text", text: t }] });
+const texto = (s) => ({ content: [{ type: "text", text: s }] });
 const peca = (slug) => MAGIA.pecas.get(String(slug).trim().toLowerCase());
-const semPeca = (slug) => ({ ...texto(`Não existe a peça "${slug}". Use buscar_fundo para achar o nome certo.`), isError: true });
+const semPeca = (slug) => ({ ...texto(t('Não existe a peça "{slug}". Use buscar_fundo para achar o nome certo.', { slug })), isError: true });
 const servidorTemasPara = (j) => createSdkMcpServer({
   name: "claudinho",
   version: "0.2.0",
@@ -115,19 +147,19 @@ const servidorTemasPara = (j) => createSdkMcpServer({
     Object.entries(TEMAS).map(([id, nome]) => `${id} (${nome})`).join(", ") + ". Categorias da biblioteca: " + Object.entries(MAGIA.cats).map(([id, nome]) => `${id} (${nome})`).join(", ") + ".",
   tools: [
     tool("sugerir_tema", "Mostra na conversa um cartão do tema, com prévia animada e os botões Aplicar e Prévia.", { tema: z.enum(Object.keys(TEMAS)) },
-      async ({ tema }) => { enviarEvento(j, { tipo: "cartao_tema", tema }); return texto(`Cartão do tema ${TEMAS[tema]} mostrado. A pessoa decide se aplica.`); }, { alwaysLoad: true }),
+      async ({ tema }) => { enviarEvento(j, { tipo: "cartao_tema", tema }); return texto(t("Cartão do tema {tema} mostrado. A pessoa decide se aplica.", { tema: TEMAS[tema] })); }, { alwaysLoad: true }),
     tool("aplicar_tema", "Aplica o tema no fundo do app agora.", { tema: z.enum(Object.keys(TEMAS)) },
-      async ({ tema }) => { enviarEvento(j, { tipo: "aplicar_tema", tema }); return texto(`Tema ${TEMAS[tema]} aplicado.`); }, { alwaysLoad: true }),
+      async ({ tema }) => { enviarEvento(j, { tipo: "aplicar_tema", tema }); return texto(t("Tema {tema} aplicado.", { tema: TEMAS[tema] })); }, { alwaysLoad: true }),
     tool("buscar_fundo", "Busca animações na biblioteca ASCII Magic por palavras em inglês (ex.: ocean night, cat, rain, galaxy) e/ou categoria. Devolve até 15 peças: id, nome, categoria e descrição.",
       { busca: z.string().describe("Palavras em inglês; vazio para listar a categoria"), categoria: z.string().optional().describe("Id da categoria, opcional") },
       async ({ busca, categoria }) => {
         const r = buscaMagia(busca, categoria || "").slice(0, 15);
-        return texto(r.length ? r.map((p) => `${p.slug} — ${p.nome} (${p.cat}): ${p.nota}`).join("\n") : "Nada encontrado. Tente outras palavras em inglês ou outra categoria.");
+        return texto(r.length ? r.map((p) => `${p.slug} — ${p.nome} (${p.cat}): ${p.nota}`).join("\n") : t("Nada encontrado. Tente outras palavras em inglês ou outra categoria."));
       }, { alwaysLoad: true }),
     tool("sugerir_fundo", "Mostra na conversa um cartão de uma animação da biblioteca, com Aplicar e Prévia.", { peca: z.string().describe("Id da peça, de buscar_fundo") },
-      async ({ peca: id }) => { const p = peca(id); if (!p) return semPeca(id); enviarEvento(j, { tipo: "cartao_arte", chave: `magia:${p.slug}` }); return texto(`Cartão de ${p.nome} mostrado. A pessoa decide se aplica.`); }, { alwaysLoad: true }),
+      async ({ peca: id }) => { const p = peca(id); if (!p) return semPeca(id); enviarEvento(j, { tipo: "cartao_arte", chave: `magia:${p.slug}` }); return texto(t("Cartão de {nome} mostrado. A pessoa decide se aplica.", { nome: p.nome })); }, { alwaysLoad: true }),
     tool("aplicar_fundo", "Aplica uma animação da biblioteca no fundo do app agora.", { peca: z.string().describe("Id da peça, de buscar_fundo") },
-      async ({ peca: id }) => { const p = peca(id); if (!p) return semPeca(id); enviarEvento(j, { tipo: "aplicar_arte", chave: `magia:${p.slug}` }); return texto(`${p.nome} aplicada no fundo.`); }, { alwaysLoad: true }),
+      async ({ peca: id }) => { const p = peca(id); if (!p) return semPeca(id); enviarEvento(j, { tipo: "aplicar_arte", chave: `magia:${p.slug}` }); return texto(t("{nome} aplicada no fundo.", { nome: p.nome })); }, { alwaysLoad: true }),
   ],
 });
 const FERRAMENTAS_TEMA = ["sugerir_tema", "aplicar_tema", "buscar_fundo", "sugerir_fundo", "aplicar_fundo"].map((n) => `mcp__claudinho__${n}`);
@@ -150,9 +182,9 @@ function montaPrompt(texto, anexos = [], uuid) {
     }
     if (dados && Object.values(IMAGEM).includes(mime)) imagens.push({ type: "image", source: { type: "base64", media_type: mime, data: dados } });
   }
-  let t = texto;
-  if (caminhos.length) t += `${t ? "\n\n" : ""}Arquivos anexados:\n${caminhos.map((c) => `- ${c}`).join("\n")}`;
-  const conteudo = imagens.length ? [...imagens, { type: "text", text: t || "Veja a imagem anexada." }] : t;
+  let txt = texto;
+  if (caminhos.length) txt += `${txt ? "\n\n" : ""}${t("Arquivos anexados:")}\n${caminhos.map((c) => `- ${c}`).join("\n")}`;
+  const conteudo = imagens.length ? [...imagens, { type: "text", text: txt || t("Veja a imagem anexada.") }] : txt;
   const mensagem = { type: "user", uuid, message: { role: "user", content: conteudo }, parent_tool_use_id: null };
   return (async function* () { yield mensagem; })();
 }
@@ -164,8 +196,8 @@ async function tituloAutomatico(j, id, pergunta, resposta) {
   const dir = j.cwd;
   try {
     for await (const m of query({
-      prompt: `Dê um título curto (de 2 a 6 palavras, em português, sem aspas e sem ponto final) para esta conversa.\n\nPedido: ${pergunta.slice(0, 600)}\n\nResposta: ${resposta.slice(0, 600)}`,
-      options: { cwd: dir, model: "claude-haiku-5-5", tools: [], maxTurns: 1, persistSession: false, settingSources: [], systemPrompt: "Você só responde com um título curto." },
+      prompt: `Give this conversation a short title: 2 to 6 words, in ${nomeIdioma()}, with no quotes and no final period. Reply with the title only.\n\nRequest: ${pergunta.slice(0, 600)}\n\nReply: ${resposta.slice(0, 600)}`,
+      options: { cwd: dir, model: "claude-haiku-5-5", tools: [], maxTurns: 1, persistSession: false, settingSources: [], systemPrompt: `You only reply with a short title, written in ${nomeIdioma()}.` },
     })) if (m.type === "result" && m.subtype === "success") titulo = String(m.result || "").split("\n")[0].replace(/^["'“”*#\s]+|["'“”*.\s]+$/g, "").slice(0, 60);
   } catch {}
   if (!titulo) return;
@@ -222,20 +254,20 @@ function leMotion(conteudo, nomeArquivo) {
       return { linhas: linhas.map((l) => l.join("").replace(/\s+$/, "")), fg, bg, dur: f.duration || 1000 / fps };
     }) };
   } else if (o) {
-    throw new Error("Esse arquivo do ASCII Motion tem camadas. No ASCII Motion, use Export → JSON e importe o arquivo .json.");
+    throw new Error(t("Esse arquivo do ASCII Motion tem camadas. No ASCII Motion, use Export → JSON e importe o arquivo .json."));
   } else {
     const quadros = conteudo.replace(/\r/g, "").split(/\n-{3,}\n/).map((q) => ({ linhas: q.split("\n"), fg: {}, bg: {}, dur: 100 }));
     anim = { nome, w: 0, h: 0, quadros };
   }
   anim.quadros = anim.quadros.filter((q) => q.linhas.length).slice(0, 3000);
-  if (!anim.quadros.length) throw new Error("Nenhum quadro no arquivo.");
+  if (!anim.quadros.length) throw new Error(t("Nenhum quadro no arquivo."));
   anim.w = Math.min(400, Math.max(anim.w || 0, ...anim.quadros.map((q) => Math.max(0, ...q.linhas.map((l) => [...l].length)))));
   anim.h = Math.min(400, Math.max(anim.h || 0, ...anim.quadros.map((q) => q.linhas.length)));
   if (!anim.fundo || anim.fundo === "transparent") anim.fundo = "#0d0d0f";
   return anim;
 }
 function importaMotion(arquivo) {
-  if (fs.statSync(arquivo).size > 40 * 1024 * 1024) throw new Error("Arquivo grande demais (máx. 40 MB).");
+  if (fs.statSync(arquivo).size > 40 * 1024 * 1024) throw new Error(t("Arquivo grande demais (máx. 40 MB)."));
   const anim = leMotion(fs.readFileSync(arquivo, "utf8"), arquivo);
   const base = anim.nome.toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "animacao";
   anim.id = `${base}-${crypto.randomBytes(3).toString("hex")}`;
@@ -247,13 +279,15 @@ const idMotion = (id) => String(id).replace(/[^a-z0-9-]/g, "");
 
 // Personal files: backgrounds (images, GIFs, videos), sounds, music, fonts and
 // the app icon, copied into the app's data folder so they keep working if the
-// originals move. The window gets them back as file:// URLs.
+// originals move. The window gets them back as file:// URLs. nome, escolher
+// and qual are Portuguese keys for t(): the filter name, the dialog title and
+// the word inside a sentence.
 const TIPOS = {
-  fundos: { nome: "Imagem, GIF ou vídeo", ext: ["png", "jpg", "jpeg", "webp", "gif", "avif", "mp4", "webm", "mov", "m4v"] },
-  sons: { nome: "Som", ext: ["mp3", "wav", "ogg", "m4a", "flac", "aac", "opus"] },
-  musica: { nome: "Música", ext: ["mp3", "wav", "ogg", "m4a", "flac", "aac", "opus"] },
-  fontes: { nome: "Fonte", ext: ["ttf", "otf", "woff", "woff2"] },
-  icone: { nome: "Ícone", ext: ["png", "ico", "jpg", "jpeg"] },
+  fundos: { nome: "Imagem, GIF ou vídeo", escolher: "Escolher imagem, GIF ou vídeo", qual: "imagem, GIF ou vídeo", ext: ["png", "jpg", "jpeg", "webp", "gif", "avif", "mp4", "webm", "mov", "m4v"] },
+  sons: { nome: "Som", escolher: "Escolher som", qual: "som", ext: ["mp3", "wav", "ogg", "m4a", "flac", "aac", "opus"] },
+  musica: { nome: "Música", escolher: "Escolher música", qual: "música", ext: ["mp3", "wav", "ogg", "m4a", "flac", "aac", "opus"] },
+  fontes: { nome: "Fonte", escolher: "Escolher fonte", qual: "fonte", ext: ["ttf", "otf", "woff", "woff2"] },
+  icone: { nome: "Ícone", escolher: "Escolher ícone", qual: "ícone", ext: ["png", "ico", "jpg", "jpeg"] },
 };
 const pastaPessoal = (tipo) => path.join(app.getPath("userData"), "pessoal", tipo);
 const itemPessoal = (tipo, arquivo) => ({ id: arquivo, nome: arquivo.replace(/^[0-9a-f]{6}-/, "").replace(/\.[^.]+$/, ""), url: pathToFileURL(path.join(pastaPessoal(tipo), arquivo)).href, ext: path.extname(arquivo).slice(1).toLowerCase() });
@@ -265,7 +299,7 @@ function listaPessoal(tipo) {
 }
 function copiaPessoal(tipo, origem, nome) {
   const ext = path.extname(origem).slice(1).toLowerCase();
-  if (!TIPOS[tipo]?.ext.includes(ext)) throw new Error(`Formato .${ext} não serve para ${TIPOS[tipo]?.nome.toLowerCase() || tipo}.`);
+  if (!TIPOS[tipo]?.ext.includes(ext)) throw new Error(t("Formato .{ext} não serve para {tipo}.", { ext, tipo: TIPOS[tipo] ? t(TIPOS[tipo].qual) : tipo }));
   const base = (nome || path.basename(origem, path.extname(origem))).replace(/[^\p{L}\p{N} _().-]+/gu, "").trim().slice(0, 60) || tipo;
   const arquivo = `${crypto.randomBytes(3).toString("hex")}-${base}.${ext}`;
   fs.mkdirSync(pastaPessoal(tipo), { recursive: true });
@@ -340,7 +374,7 @@ function listaWeb() {
   });
 }
 function importaWallpaperEngine(pasta) {
-  if (!listaWallpaperEngine().itens.some((i) => i.pasta === pasta)) throw new Error("Esse papel de parede não está mais na biblioteca do Wallpaper Engine.");
+  if (!listaWallpaperEngine().itens.some((i) => i.pasta === pasta)) throw new Error(t("Esse papel de parede não está mais na biblioteca do Wallpaper Engine."));
   const p = lerProjeto(pasta), nome = String(p.title || "Wallpaper Engine").trim().slice(0, 60);
   if (String(p.type).toLowerCase() === "video") return copiaPessoal("fundos", path.join(pasta, p.file), nome);
   const id = `${crypto.randomBytes(3).toString("hex")}-${nome.toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "web"}`;
@@ -364,7 +398,7 @@ async function turno(j, texto, anexos) {
   const ev = (x) => enviarEvento(j, x);
   const ac = new AbortController(), uuid = crypto.randomUUID(), geral = config.visual?.geral || {};
   const novo = !j.sessionId;
-  let resposta = "";
+  let resposta = "", erroMostrado = false;
   const prompt = montaPrompt(texto, anexos, uuid);
   const q = query({
     prompt,
@@ -388,7 +422,7 @@ async function turno(j, texto, anexos) {
         if (toolName === "AskUserQuestion") ev({ tipo: "pergunta", id, perguntas: input.questions || [] });
         else ev({ tipo: "permissao", id, ferramenta: toolName, entrada: input, motivo: decisionReason ?? null, temSempre: !!suggestions?.length });
         signal.addEventListener("abort", () => {
-          if (pendentes.delete(id)) { resolve({ behavior: "deny", message: "Cancelado." }); ev({ tipo: "permissao_fim", id }); }
+          if (pendentes.delete(id)) { resolve({ behavior: "deny", message: t("Cancelado.") }); ev({ tipo: "permissao_fim", id }); }
         });
       }),
     },
@@ -418,7 +452,13 @@ async function turno(j, texto, anexos) {
         // What the last request carried is how full the context is.
         const u = msg.message.usage;
         if (u) contexto = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0);
-        if (msg.error) ev({ tipo: "erro", texto: `Erro da API: ${msg.error}` });
+        // Claude Code puts the real reason in the message text; msg.error is
+        // often just "unknown".
+        if (msg.error) {
+          const motivo = msg.message.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+          ev({ tipo: "erro", texto: motivo || t("Erro da API: {erro}", { erro: msg.error }) });
+          erroMostrado = true;
+        }
       } else if (msg.type === "user" && !msg.parent_tool_use_id && Array.isArray(msg.message?.content)) {
         for (const b of msg.message.content) {
           if (b.type === "tool_result") {
@@ -437,7 +477,9 @@ async function turno(j, texto, anexos) {
       }
     }
   } catch (err) {
-    if (!ac.signal.aborted) ev({ tipo: "erro", texto: String(err?.message || err) });
+    // after an API error Claude Code exits with code 1: that says nothing new
+    const saida = /exited with code/i.test(String(err?.message));
+    if (!ac.signal.aborted && !(saida && erroMostrado)) ev({ tipo: "erro", texto: String(err?.message || err) + (saida ? stderrRecente() : "") });
   } finally {
     j.atual = null;
     ev({ tipo: "parado" });
@@ -549,19 +591,19 @@ ipcMain.handle("estado", (e) => ({ ...config, cwd: J(e).cwd, sessionId: J(e).ses
 ipcMain.handle("enviar", (e, texto, anexos) => {
   const j = J(e);
   if (j.atual) return false;
-  if (j.sessionId && emOutra(j, j.sessionId)) { enviarEvento(j, { tipo: "erro", texto: "Essa conversa está rodando em outra janela. Espere ela terminar." }); return false; }
+  if (j.sessionId && emOutra(j, j.sessionId)) { enviarEvento(j, { tipo: "erro", texto: t("Essa conversa está rodando em outra janela. Espere ela terminar.") }); return false; }
   turno(j, String(texto), Array.isArray(anexos) ? anexos : []); return true;
 });
 ipcMain.handle("janela_nova", (_e, sessao) => { criarJanela(sessao || undefined); });
 ipcMain.handle("comandos", async (e) => { try { return await comandos(J(e)); } catch (e) { console.log("[comandos]", e?.message || e); return []; } });
 ipcMain.handle("anexar", async (e) => {
-  const r = await dialog.showOpenDialog(J(e).win, { title: "Anexar arquivos", defaultPath: J(e).cwd, properties: ["openFile", "multiSelections"] });
+  const r = await dialog.showOpenDialog(J(e).win, { title: t("Anexar arquivos"), defaultPath: J(e).cwd, properties: ["openFile", "multiSelections"] });
   return r.canceled ? [] : r.filePaths;
 });
 ipcMain.handle("motion_importar", async (e, caminho) => {
   let arquivo = caminho;
   if (!arquivo) {
-    const r = await dialog.showOpenDialog(J(e).win, { title: "Importar animação do ASCII Motion", filters: [{ name: "ASCII Motion", extensions: ["json", "asciimtn", "txt"] }], properties: ["openFile"] });
+    const r = await dialog.showOpenDialog(J(e).win, { title: t("Importar animação do ASCII Motion"), filters: [{ name: "ASCII Motion", extensions: ["json", "asciimtn", "txt"] }], properties: ["openFile"] });
     if (r.canceled || !r.filePaths[0]) return null;
     arquivo = r.filePaths[0];
   }
@@ -576,7 +618,7 @@ ipcMain.handle("parar", async (e) => { const a = J(e).atual; if (a) { try { awai
 ipcMain.handle("permissao", (_e, { id, decisao }) => {
   const p = pendentes.get(id); if (!p) return;
   pendentes.delete(id);
-  if (decisao === "negar") p.resolve({ behavior: "deny", message: "A pessoa negou." });
+  if (decisao === "negar") p.resolve({ behavior: "deny", message: t("A pessoa negou.") });
   else {
     p.resolve({ behavior: "allow", updatedPermissions: decisao === "sempre" ? p.suggestions : undefined });
     // Approving a plan leaves plan mode: the next turns may edit (asking first).
@@ -639,16 +681,18 @@ ipcMain.handle("uso", async (e) => {
 // on disk and reused until the next day.
 ipcMain.handle("novidades", async () => {
   const arq = path.join(app.getPath("userData"), "novidades.json");
-  try { const c = JSON.parse(fs.readFileSync(arq, "utf8")); if (Date.now() - c.quando < 20 * 3600e3 && c.itens?.length) return c.itens; } catch {}
+  // the news is kept per language, so switching it doesn't show yesterday's in the old one
+  const lingua = idioma();
+  try { const c = JSON.parse(fs.readFileSync(arq, "utf8")); if ((c.idioma || "pt") === lingua && Date.now() - c.quando < 20 * 3600e3 && c.itens?.length) return c.itens; } catch {}
   let texto = "";
   try {
     for await (const m of query({
-      prompt: "Pesquise na web as novidades mais recentes (últimas semanas) sobre a Anthropic, o Claude e o Claude Code. Responda só com 4 frases curtas em português do Brasil, uma por linha, sem marcadores nem links, cada uma com um fato novo e concreto (no máximo 120 caracteres cada). Se não achar nada recente, responda vazio.",
-      options: { cwd: app.getPath("home"), model: "claude-haiku-5-5", tools: ["WebSearch"], allowedTools: ["WebSearch"], maxTurns: 4, persistSession: false, settingSources: [], systemPrompt: "Você pesquisa e resume notícias com precisão. Nunca invente." },
+      prompt: `Search the web for the latest news (past few weeks) about Anthropic, Claude and Claude Code. Answer in ${nomeIdioma()} with only 4 short sentences, one per line, no bullets and no links, each one a new and concrete fact (at most 120 characters each). If you find nothing recent, reply with nothing at all.`,
+      options: { cwd: app.getPath("home"), model: "claude-haiku-5-5", tools: ["WebSearch"], allowedTools: ["WebSearch"], maxTurns: 4, persistSession: false, settingSources: [], systemPrompt: `You research and summarize news accurately and write in ${nomeIdioma()}. Never make anything up.` },
     })) if (m.type === "result" && m.subtype === "success") texto = String(m.result || "");
   } catch {}
   const itens = texto.split(/\r?\n/).map((l) => l.replace(/^[-*•\d.\s]+/, "").trim()).filter((l) => l.length > 15 && l.length < 200).slice(0, 5);
-  if (itens.length) try { fs.writeFileSync(arq, JSON.stringify({ quando: Date.now(), itens })); } catch {}
+  if (itens.length) try { fs.writeFileSync(arq, JSON.stringify({ quando: Date.now(), idioma: lingua, itens })); } catch {}
   return itens;
 });
 // Files Claude changed open in their own app, or show in their folder.
@@ -658,14 +702,14 @@ ipcMain.handle("abrir_arquivo", (_e, caminho, naPasta) => { if (!caminho || !fs.
 ipcMain.handle("responder", (_e, { id, respostas }) => {
   const p = pendentes.get(id); if (!p) return;
   pendentes.delete(id);
-  if (!respostas) p.resolve({ behavior: "deny", message: "A pessoa preferiu não responder." });
+  if (!respostas) p.resolve({ behavior: "deny", message: t("A pessoa preferiu não responder.") });
   else p.resolve({ behavior: "allow", updatedInput: { ...p.input, answers: respostas } });
 });
 // Undo: put the files back as they were when a message was sent. A short
 // query on the conversation does it when no turn is running.
 ipcMain.handle("desfazer", async (e, { uuid, simular }) => {
   const { sessionId, atual, cwd } = J(e);
-  if (!sessionId || !uuid) return { canRewind: false, error: "Sem conversa." };
+  if (!sessionId || !uuid) return { canRewind: false, error: t("Sem conversa.") };
   if (atual) return await atual.q.rewindFiles(uuid, { dryRun: !!simular }).catch((e) => ({ canRewind: false, error: String(e.message || e) }));
   const ac = new AbortController();
   let solta;
@@ -717,8 +761,8 @@ function titulosDoApp() {
 // worked in (the terminal, the Claude app, other windows: all the same files).
 // Scratch folders the Claude app makes for loose chats count as one project.
 const projeto = (cwd) => {
-  if (!cwd) return "Sem pasta";
-  if (/[\\/]scratch-workspaces[\\/]|[\\/]scratch-\d{4}-\d\d-\d\d-[0-9a-f]+$/i.test(cwd)) return "Rascunhos";
+  if (!cwd) return t("Sem pasta");
+  if (/[\\/]scratch-workspaces[\\/]|[\\/]scratch-\d{4}-\d\d-\d\d-[0-9a-f]+$/i.test(cwd)) return t("Rascunhos");
   return cwd.split(/[\\/]/).filter(Boolean).pop();
 };
 ipcMain.handle("sessoes", async (e, { todas } = {}) => {
@@ -727,7 +771,7 @@ ipcMain.handle("sessoes", async (e, { todas } = {}) => {
     return lista.map((s) => {
       const a = doApp.get(s.sessionId);
       // a name the person gave wins (in the app or here); then the app's own title
-      const titulo = (a?.doUsuario && a.titulo) || s.customTitle || a?.titulo || s.summary || s.firstPrompt || "Sem título";
+      const titulo = (a?.doUsuario && a.titulo) || s.customTitle || a?.titulo || s.summary || s.firstPrompt || t("Sem título");
       return { id: s.sessionId, titulo, quando: Math.max(s.lastModified || 0, a?.quando || 0), cwd: s.cwd || "", projeto: projeto(s.cwd), doApp: !!a, arquivada: !!a?.arquivada };
     }).filter((s) => !s.arquivada);
   } catch { return []; }
@@ -748,20 +792,20 @@ ipcMain.handle("ramificar", async (e, { id, uuid, titulo, cwd }) => {
     const dir = cwd && fs.existsSync(cwd) ? cwd : j.cwd;
     const r = await forkSession(origem, { dir, upToMessageId: uuid || undefined, title: titulo || undefined });
     j.cwd = dir; j.sessionId = r.sessionId;
-    return { id: r.sessionId, titulo: titulo || "Ramo", cwd: dir };
+    return { id: r.sessionId, titulo: titulo || t("Ramo"), cwd: dir };
   } catch (e) { console.log("[ramificar]", e?.message || e); return null; }
 });
 // Export a conversation as Markdown, where the person chooses.
 ipcMain.handle("exportar", async (e, { id, titulo, cwd }) => {
-  const nome = (titulo || "conversa").replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 80) || "conversa";
-  const r = await dialog.showSaveDialog(J(e).win, { title: "Exportar conversa", defaultPath: path.join(app.getPath("documents"), nome + ".md"), filters: [{ name: "Markdown", extensions: ["md"] }] });
+  const nome = (titulo || t("conversa")).replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 80) || t("conversa");
+  const r = await dialog.showSaveDialog(J(e).win, { title: t("Exportar conversa"), defaultPath: path.join(app.getPath("documents"), nome + ".md"), filters: [{ name: "Markdown", extensions: ["md"] }] });
   if (r.canceled || !r.filePath) return null;
   try {
-  const partes = [`# ${titulo || "Conversa"}`, ""];
+  const partes = [`# ${titulo || t("Conversa")}`, ""];
   for (const m of await historico(id, cwd || J(e).cwd)) {
-    if (m.papel === "eu") partes.push(`**Você:**${m.imagens ? ` _(${m.imagens} imagem${m.imagens > 1 ? "ns" : ""})_` : ""}`, "", m.texto || "", "");
+    if (m.papel === "eu") partes.push(`**${t("Você")}:**${m.imagens ? ` _(${t(m.imagens > 1 ? "{n} imagens" : "{n} imagem", { n: m.imagens })})_` : ""}`, "", m.texto || "", "");
     else if (m.papel === "claude") partes.push("**Claude:**", "", m.texto, "");
-    else partes.push(`> Ferramenta: ${m.nome}`, "");
+    else partes.push(`> ${t("Ferramenta: {nome}", { nome: m.nome })}`, "");
   }
   fs.writeFileSync(r.filePath, partes.join("\n"));
   return r.filePath;
@@ -799,7 +843,7 @@ ipcMain.handle("apagar", async (e, id, cwd) => {
 ipcMain.handle("pasta", async (e) => {
   const j = J(e);
   if (j.atual) return null;
-  const r = await dialog.showOpenDialog(j.win, { title: "Pasta do projeto", defaultPath: j.cwd, properties: ["openDirectory"] });
+  const r = await dialog.showOpenDialog(j.win, { title: t("Pasta do projeto"), defaultPath: j.cwd, properties: ["openDirectory"] });
   if (r.canceled || !r.filePaths[0]) return null;
   config.cwd = j.cwd = r.filePaths[0]; j.sessionId = null; salvarConfig(); return j.cwd;
 });
@@ -817,10 +861,10 @@ ipcMain.handle("visual_salvar", (_e, visual) => {
 });
 ipcMain.handle("pessoal_lista", (_e, tipo) => listaPessoal(tipo));
 ipcMain.handle("pessoal_importar", async (e, tipo, caminhos) => {
-  if (!TIPOS[tipo]) return { erro: "Tipo desconhecido." };
+  if (!TIPOS[tipo]) return { erro: t("Tipo desconhecido.") };
   let lista = Array.isArray(caminhos) ? caminhos.filter(Boolean) : [];
   if (!lista.length) {
-    const r = await dialog.showOpenDialog(J(e).win, { title: `Escolher ${TIPOS[tipo].nome.toLowerCase()}`, filters: [{ name: TIPOS[tipo].nome, extensions: TIPOS[tipo].ext }], properties: ["openFile", ...(tipo === "icone" ? [] : ["multiSelections"])] });
+    const r = await dialog.showOpenDialog(J(e).win, { title: t(TIPOS[tipo].escolher), filters: [{ name: t(TIPOS[tipo].nome), extensions: TIPOS[tipo].ext }], properties: ["openFile", ...(tipo === "icone" ? [] : ["multiSelections"])] });
     if (r.canceled) return { itens: [] };
     lista = r.filePaths;
   }
@@ -842,7 +886,7 @@ ipcMain.handle("conta_salvar", (_e, { entrar, chave }) => {
   if (typeof chave === "string") {
     const c = chave.trim();
     if (!c) delete config.chaveApi;
-    else if (!safeStorage.isEncryptionAvailable()) return { erro: "O sistema não oferece armazenamento seguro para a chave." };
+    else if (!safeStorage.isEncryptionAvailable()) return { erro: t("O sistema não oferece armazenamento seguro para a chave.") };
     else config.chaveApi = safeStorage.encryptString(c).toString("base64");
   }
   salvarConfig();
@@ -895,6 +939,13 @@ app.commandLine.appendSwitch("enable-zero-copy");
 // touch the person's settings and can run with the app open.
 if (process.env.VIVO_PASTA || process.env.VIVO_JS) app.setPath("userData", path.join(app.getPath("appData"), process.env.VIVO_PERFIL || "Claudinho-teste"));
 if (!process.env.VIVO_ATALHOS && !app.requestSingleInstanceLock()) app.quit();
+// Last guard: a broken pipe to a Claude Code process only fails that query,
+// it is logged instead of shown. Anything else still gets Electron's dialog.
+process.on("uncaughtException", (e) => {
+  if (["read", "write"].includes(e?.syscall) && ["ENOTCONN", "EPIPE", "ECONNRESET", "EOF"].includes(e?.code)) return console.log("[claude] cano quebrado:", e.code, e.syscall);
+  console.error(e);
+  dialog.showErrorBox(t("Ocorreu um erro no Claudinho"), String(e?.stack || e));
+});
 app.on("second-instance", () => {
   const w = principal?.win; if (!w) return;
   if (w.isMinimized()) w.restore(); w.show(); w.focus();
@@ -903,7 +954,7 @@ app.on("second-instance", () => {
 // lets you pin it to the taskbar) and the project folder.
 // Run once with VIVO_ATALHOS=1.
 function criaAtalhos() {
-  const alvo = { target: process.execPath, args: `"${app.getAppPath()}"`, cwd: app.getAppPath(), icon: path.join(here, "icone.ico"), iconIndex: 0, appUserModelId: APP_ID, description: "Claudinho: o Claude Code com papéis de parede vivos" };
+  const alvo = { target: process.execPath, args: `"${app.getAppPath()}"`, cwd: app.getAppPath(), icon: path.join(here, "icone.ico"), iconIndex: 0, appUserModelId: APP_ID, description: t("Claudinho: o Claude Code com papéis de parede vivos") };
   const lugares = [path.join(app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs", "Claudinho.lnk"), path.join(app.getAppPath(), "Claudinho.lnk")];
   for (const l of lugares) console.log("[atalho]", shell.writeShortcutLink(l, fs.existsSync(l) ? "replace" : "create", alvo) ? "ok" : "falhou", l);
 }

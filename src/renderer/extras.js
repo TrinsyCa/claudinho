@@ -31,7 +31,7 @@ function diffDe(nome, e) {
     if (++n > 400) return "";
     return `<div class="l ${s === "+" ? "mais" : s === "-" ? "menos" : ""}"><i>${s === " " ? "" : s === "-" ? "−" : "+"}</i><code>${esc(l) || " "}</code></div>`;
   }).join("")).join('<div class="l corte"><i>⋯</i></div>');
-  return { html: `<div class="diff">${html}${n > 400 ? '<div class="l corte"><i>⋯</i><code>(diff longo, cortado)</code></div>' : ""}</div>`, contagem: `<em class="contagem"><b>+${mais}</b><s>−${menos}</s></em>` };
+  return { html: `<div class="diff">${html}${n > 400 ? `<div class="l corte"><i>⋯</i><code>${t("(diff longo, cortado)")}</code></div>` : ""}</div>`, contagem: `<em class="contagem"><b>+${mais}</b><s>−${menos}</s></em>` };
 }
 
 // ---- Claude's reasoning --------------------------------------------------------------
@@ -40,7 +40,7 @@ let racEl = null, racTexto = "", racT0 = 0, racAgendado = false;
 function abreRaciocinio() {
   fechaRaciocinio(); fechaSegmento(); tiraPensando();
   racEl = bloco("raciocinio"); racTexto = ""; racT0 = performance.now();
-  racEl.innerHTML = `<button class="rac-topo">${mosaicoMini()}<b>Raciocinando…</b></button><div class="rac-texto"></div>`;
+  racEl.innerHTML = `<button class="rac-topo">${mosaicoMini()}<b>${t("Raciocinando…")}</b></button><div class="rac-texto"></div>`;
   racEl.classList.add("aberto", "vivo");
   racEl.querySelector(".rac-topo").onclick = (e) => e.currentTarget.parentElement.classList.toggle("aberto");
 }
@@ -55,7 +55,7 @@ function fechaRaciocinio() {
   if (!racEl) return;
   const s = Math.max(1, Math.round((performance.now() - racT0) / 1000));
   racEl.querySelector(".rac-texto").textContent = racTexto;
-  racEl.querySelector(".rac-topo").innerHTML = `${svg('<path d="m9 6 6 6-6 6"/>')}<b>Raciocínio</b><small>${s}s</small>`;
+  racEl.querySelector(".rac-topo").innerHTML = `${svg('<path d="m9 6 6 6-6 6"/>')}<b>${t("Raciocínio")}</b><small>${s}s</small>`;
   racEl.classList.remove("aberto", "vivo"); racEl = null;
 }
 // The 3×3 mark as a tiny live indicator.
@@ -67,11 +67,11 @@ function pergunta(ev) {
   fechaRaciocinio(); fechaSegmento(); tiraPensando();
   const el = bloco("pergunta"), escolhas = ev.perguntas.map(() => new Set());
   el.dataset.id = ev.id;
-  el.innerHTML = `<div class="t">${svg('<circle cx="12" cy="12" r="8.5"/><path d="M9.8 9.5a2.3 2.3 0 1 1 3.2 2.1c-.7.3-1 .8-1 1.5v.4M12 16.5h.01"/>')}<span>O Claude quer saber</span></div>` +
+  el.innerHTML = `<div class="t">${svg('<circle cx="12" cy="12" r="8.5"/><path d="M9.8 9.5a2.3 2.3 0 1 1 3.2 2.1c-.7.3-1 .8-1 1.5v.4M12 16.5h.01"/>')}<span>${t("O Claude quer saber")}</span></div>` +
     ev.perguntas.map((q, k) => `<div class="q" data-k="${k}">${q.header ? `<span class="rotulo">${esc(q.header)}</span>` : ""}<p>${esc(q.question)}</p>
       <div class="ops">${(q.options || []).map((o, n) => `<button class="op" data-n="${n}"><b>${esc(o.label)}</b>${o.description ? `<small>${esc(o.description)}</small>` : ""}</button>`).join("")}</div>
-      <input class="outra" placeholder="Ou escreva outra resposta…" /></div>`).join("") +
-    `<div class="b"><button class="btn forte" data-a="ok">Responder</button><button class="btn" data-a="pular">Pular</button></div>`;
+      <input class="outra" placeholder="${t("Ou escreva outra resposta…")}" /></div>`).join("") +
+    `<div class="b"><button class="btn forte" data-a="ok">${t("Responder")}</button><button class="btn" data-a="pular">${t("Pular")}</button></div>`;
   el.querySelectorAll(".q").forEach((qEl) => {
     const k = +qEl.dataset.k, multi = !!ev.perguntas[k].multiSelect;
     qEl.querySelectorAll(".op").forEach((b) => (b.onclick = () => {
@@ -89,29 +89,30 @@ function pergunta(ev) {
       const marcadas = [...escolhas[k]].map((n) => q.options[n].label);
       respostas[q.question] = outra || marcadas.join(", ");
     });
-    if (Object.values(respostas).some((v) => !v)) { nota("Responda todas as perguntas (ou clique em Pular)."); return; }
+    if (Object.values(respostas).some((v) => !v)) { nota(t("Responda todas as perguntas (ou clique em Pular).")); return; }
     vivo.responder(ev.id, respostas); fecha(Object.values(respostas).join(" · "));
   };
-  el.querySelector('[data-a="pular"]').onclick = () => { vivo.responder(ev.id, null); fecha("Pulou a pergunta"); };
+  el.querySelector('[data-a="pular"]').onclick = () => { vivo.responder(ev.id, null); fecha(t("Pulou a pergunta")); };
   forcaDesce();
 }
 
 // ---- plan limits ----------------------------------------------------------------------------
 // The subscription's usage windows: shown with the context meter, a warning
 // near the end, and when the limit is hit, an offer to carry on by itself.
-const JANELA = { five_hour: "janela de 5 horas", seven_day: "semana", seven_day_opus: "semana (Opus)", seven_day_sonnet: "semana (Sonnet)" };
+const JANELA = { five_hour: t("janela de 5 horas"), seven_day: t("semana"), seven_day_opus: t("semana (Opus)"), seven_day_sonnet: t("semana (Sonnet)") };
+const ROT_PLANO = "\n" + t("Plano:");
 let limite = null, timerContinua = null;
-const quando = (s) => { const d = new Date(s < 1e12 ? s * 1000 : s); return d.toLocaleString("pt-BR", { weekday: d.toDateString() === new Date().toDateString() ? undefined : "short", hour: "2-digit", minute: "2-digit" }); };
+const quando = (s) => { const d = new Date(s < 1e12 ? s * 1000 : s); return d.toLocaleString(I18N.locale, { weekday: d.toDateString() === new Date().toDateString() ? undefined : "short", hour: "2-digit", minute: "2-digit" }); };
 function mostraLimite(info) {
   limite = info;
   const uso = info.utilization == null ? null : Math.round(info.utilization > 1 ? info.utilization : info.utilization * 100);
   const m = $("medidor");
-  m.dataset.plano = uso == null ? "" : `\nPlano: ${uso}% da ${JANELA[info.rateLimitType] || "janela atual"}${info.resetsAt ? `, renova ${quando(info.resetsAt)}` : ""}.`;
-  m.title = (m.title || "").split("\nPlano:")[0] + m.dataset.plano;
-  if (info.status === "allowed_warning") nota(`Você já usou ${uso ?? "boa parte"}% da ${JANELA[info.rateLimitType] || "janela"} do seu plano.`);
+  m.dataset.plano = uso == null ? "" : ROT_PLANO + " " + t("{uso}% da {janela}{renova}.", { uso, janela: JANELA[info.rateLimitType] || t("janela atual"), renova: info.resetsAt ? t(", renova {quando}", { quando: quando(info.resetsAt) }) : "" });
+  m.title = (m.title || "").split(ROT_PLANO)[0] + m.dataset.plano;
+  if (info.status === "allowed_warning") { const janela = JANELA[info.rateLimitType] || t("janela"); nota(uso == null ? t("Você já usou boa parte da {janela} do seu plano.", { janela }) : t("Você já usou {uso}% da {janela} do seu plano.", { uso, janela })); }
   if (info.status === "rejected") {
     const el = bloco("limite");
-    el.innerHTML = `<b>Você chegou no limite do plano.</b><span>${info.resetsAt ? `Libera ${quando(info.resetsAt)}.` : "Libera em breve."}</span>${info.resetsAt ? '<button class="btn forte">Continuar sozinho quando liberar</button>' : ""}`;
+    el.innerHTML = `<b>${t("Você chegou no limite do plano.")}</b><span>${info.resetsAt ? t("Libera {quando}.", { quando: quando(info.resetsAt) }) : t("Libera em breve.")}</span>${info.resetsAt ? `<button class="btn forte">${t("Continuar sozinho quando liberar")}</button>` : ""}`;
     el.querySelector("button")?.addEventListener("click", (e) => {
       const ms = (info.resetsAt < 1e12 ? info.resetsAt * 1000 : info.resetsAt) - Date.now() + 60000;
       const conversa = sessaoAtual, titulo = $("titulo").textContent;
@@ -119,9 +120,9 @@ function mostraLimite(info) {
       timerContinua = setTimeout(async () => {
         if (!conversa) return;
         if (sessaoAtual !== conversa) { if (rodando) return; await abreSessao(conversa, titulo); }
-        envia("Pode continuar de onde parou.");
+        envia(t("Pode continuar de onde parou."));
       }, Math.max(5000, ms));
-      e.currentTarget.textContent = `Combinado: continua ${quando(info.resetsAt)}`; e.currentTarget.disabled = true;
+      e.currentTarget.textContent = t("Combinado: continua {quando}", { quando: quando(info.resetsAt) }); e.currentTarget.disabled = true;
     });
     forcaDesce();
   }
@@ -129,24 +130,25 @@ function mostraLimite(info) {
 
 // ---- undo file changes from a message on --------------------------------------------
 async function desfazDaqui(el) {
-  if (rodando) { nota("Espere o Claude terminar para desfazer."); return; }
+  if (rodando) { nota(t("Espere o Claude terminar para desfazer.")); return; }
   const uuid = el.dataset.uuid;
-  if (!uuid) { nota("Essa mensagem não tem ponto de restauração."); return; }
+  if (!uuid) { nota(t("Essa mensagem não tem ponto de restauração.")); return; }
   el.nextElementSibling?.classList.contains("desfaz-card") && el.nextElementSibling.remove();
   const previa = await vivo.desfazer(uuid, true);
   const n = previa?.filesChanged?.length || 0;
-  if (!previa?.canRewind || !n) { nota(previa?.error ? `Não deu: ${previa.error}` : "Nenhum arquivo mudou depois desta mensagem."); return; }
+  if (!previa?.canRewind || !n) { nota(previa?.error ? t("Não deu: {erro}", { erro: previa.error }) : t("Nenhum arquivo mudou depois desta mensagem.")); return; }
   const card = document.createElement("div");
   card.className = "desfaz-card";
-  card.innerHTML = `<span>Voltar <b>${n} arquivo${n > 1 ? "s" : ""}</b> <em class="contagem"><b>+${previa.insertions || 0}</b><s>−${previa.deletions || 0}</s></em> para como estava${n > 1 ? "m" : ""} antes desta mensagem?</span><small>${previa.filesChanged.map((f) => esc(f.split(/[\\/]/).pop())).join(", ")}</small><div class="b"><button class="btn forte">Desfazer</button><button class="btn">Cancelar</button></div>`;
+  const contagem = `<em class="contagem"><b>+${previa.insertions || 0}</b><s>−${previa.deletions || 0}</s></em>`;
+  card.innerHTML = `<span>${t(n > 1 ? "Voltar <b>{n} arquivos</b> {contagem} para como estavam antes desta mensagem?" : "Voltar <b>{n} arquivo</b> {contagem} para como estava antes desta mensagem?", { n, contagem })}</span><small>${previa.filesChanged.map((f) => esc(f.split(/[\\/]/).pop())).join(", ")}</small><div class="b"><button class="btn forte">${t("Desfazer")}</button><button class="btn">${t("Cancelar")}</button></div>`;
   el.after(card);
   const [sim, nao] = card.querySelectorAll("button");
   nao.onclick = () => card.remove();
   sim.onclick = async () => {
     const r = await vivo.desfazer(uuid, false);
     card.remove();
-    if (!r?.canRewind) { nota(`Não deu: ${r?.error || "erro desconhecido"}`, true); return; }
-    aviso(`Arquivos restaurados: ${(r.filesChanged || previa.filesChanged).map((f) => f.split(/[\\/]/).pop()).join(", ")}. O Claude não sabe disso; conte a ele se for continuar.`);
+    if (!r?.canRewind) { nota(t("Não deu: {erro}", { erro: r?.error || t("erro desconhecido") }), true); return; }
+    aviso(t("Arquivos restaurados: {arquivos}. O Claude não sabe disso; conte a ele se for continuar.", { arquivos: (r.filesChanged || previa.filesChanged).map((f) => f.split(/[\\/]/).pop()).join(", ") }));
   };
 }
 
@@ -154,18 +156,18 @@ async function desfazDaqui(el) {
 // Big pastes become a chip (seen and edited on click) instead of flooding the box.
 entrada.addEventListener("paste", (e) => {
   if (e.clipboardData?.files?.length) return;
-  const t = e.clipboardData?.getData("text") || "", linhas = t.split("\n").length;
-  if (t.length < 1500 && linhas < 25) return;
+  const txt = e.clipboardData?.getData("text") || "", linhas = txt.split("\n").length;
+  if (txt.length < 1500 && linhas < 25) return;
   e.preventDefault();
-  anexos.push({ tipo: "texto", nome: `Texto colado · ${linhas} linha${linhas > 1 ? "s" : ""}`, conteudo: t });
+  anexos.push({ tipo: "texto", nome: t(linhas > 1 ? "Texto colado · {n} linhas" : "Texto colado · {n} linha", { n: linhas }), conteudo: txt });
   desenhaAnexos();
 });
 function editaColado(a) {
-  creditosCaixa.innerHTML = `<div class="cred-topo"><span class="marca"><b>${esc(a.nome)}</b></span><button class="icone" id="fechaCreditos" title="Fechar (Esc)">${ICONE.erro}</button></div>
-    <textarea class="colado-texto" spellcheck="false"></textarea><div class="b colado-b"><button class="btn forte" data-a="salva">Salvar</button><button class="btn" data-a="tira">Remover</button></div>`;
+  creditosCaixa.innerHTML = `<div class="cred-topo"><span class="marca"><b>${esc(a.nome)}</b></span><button class="icone" id="fechaCreditos" title="${t("Fechar (Esc)")}">${ICONE.erro}</button></div>
+    <textarea class="colado-texto" spellcheck="false"></textarea><div class="b colado-b"><button class="btn forte" data-a="salva">${t("Salvar")}</button><button class="btn" data-a="tira">${t("Remover")}</button></div>`;
   const ta = creditosCaixa.querySelector("textarea"); ta.value = a.conteudo;
   creditosCaixa.querySelector("#fechaCreditos").onclick = fechaCreditos;
-  creditosCaixa.querySelector('[data-a="salva"]').onclick = () => { a.conteudo = ta.value; const n = ta.value.split("\n").length; a.nome = `Texto colado · ${n} linha${n > 1 ? "s" : ""}`; fechaCreditos(); desenhaAnexos(); };
+  creditosCaixa.querySelector('[data-a="salva"]').onclick = () => { a.conteudo = ta.value; const n = ta.value.split("\n").length; a.nome = t(n > 1 ? "Texto colado · {n} linhas" : "Texto colado · {n} linha", { n }); fechaCreditos(); desenhaAnexos(); };
   creditosCaixa.querySelector('[data-a="tira"]').onclick = () => { anexos.splice(anexos.indexOf(a), 1); fechaCreditos(); desenhaAnexos(); };
   creditos.classList.add("on"); ta.focus();
 }
@@ -208,7 +210,7 @@ vivo.aoEvento((ev) => {
     case "ferramenta": fechaRaciocinio(); mudaEstado("ferramenta", { nome: ev.nome }); ondaClaude(true); break;
     case "ferramenta_fim": mudaEstado("pensando"); break;
     case "permissao": fechaRaciocinio(); mudaEstado("esperando"); break;
-    case "pergunta": pergunta(ev); mudaEstado("esperando"); window.somEvento?.("permissao"); avisaSistema("O Claude tem uma pergunta", ev.perguntas?.[0]?.question || ""); break;
+    case "pergunta": pergunta(ev); mudaEstado("esperando"); window.somEvento?.("permissao"); avisaSistema(t("O Claude tem uma pergunta"), ev.perguntas?.[0]?.question || ""); break;
     case "limite": mostraLimite(ev.info); break;
     case "titulo": if (ev.id === sessaoAtual) $("titulo").textContent = ev.titulo; carregaSessoes(); break;
     case "erro": mudaEstado("erro"); setTimeout(() => estadoClaude === "erro" && mudaEstado("parado"), 1600); break;
