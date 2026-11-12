@@ -10,7 +10,7 @@ import atualizador from "electron-updater";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { t, usaIdioma, nomeIdioma, idioma, detectaIdioma } from "./i18n-main.js";
@@ -39,11 +39,40 @@ function chaveApi() {
   if (!config.chaveApi) return "";
   try { return safeStorage.decryptString(Buffer.from(config.chaveApi, "base64")); } catch { return ""; }
 }
+// Claude Code's process for the SDK. On Windows Node sometimes can't start
+// reading the child's stdout pipe (read ENOTCONN); the SDK listens for errors
+// on stdin and stderr but not on stdout, so that one error took down the whole
+// main process. Here a broken pipe ends the child; the SDK then fails that
+// query with the pipe's error, which the turn shows in the window.
+function abreClaude({ command, args, cwd, env, signal }) {
+  const filho = spawn(command, args, { cwd, env, signal, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  let erro = "", falhou = false;
+  const falha = (e) => {
+    if (falhou) return;
+    falhou = true;
+    console.log("[claude] falhou:", e?.code || e?.message || e);
+    try { filho.kill(); } catch {}
+  };
+  filho.stdin.on("error", () => {});
+  filho.stdout.on("error", falha);
+  filho.stderr.on("error", falha);
+  filho.stderr.on("data", (d) => { erro = (erro + d).slice(-2000); });
+  filho.once("exit", (codigo) => {
+    if (!codigo || !erro.trim()) return;
+    console.log("[claude] saiu com", codigo + ":", erro.trim());
+    ultimoStderr = { texto: erro.trim().split(/\r?\n/).slice(-6).join("\n"), quando: Date.now() };
+  });
+  return filho;
+}
+// what the last Claude Code that failed wrote to stderr, for the error the
+// window shows when its process exits (only if it is from the last seconds)
+let ultimoStderr = { texto: "", quando: 0 };
+const stderrRecente = () => (Date.now() - ultimoStderr.quando < 15000 ? "\n" + ultimoStderr.texto : "");
 // every query goes through here: the person's Claude Code and the chosen sign-in
 function query(args) {
   const exe = acharClaude();
   if (!exe && !temClaudeEmbutido()) throw new Error(t("Não encontrei o Claude Code neste computador. Instale em code.claude.com/docs/en/setup e abra o Claudinho de novo."));
-  const extra = {};
+  const extra = { spawnClaudeCodeProcess: abreClaude };
   if (exe) extra.pathToClaudeCodeExecutable = exe;
   const chave = config.entrar === "chave" ? chaveApi() : "";
   if (chave) extra.env = { ...process.env, ANTHROPIC_API_KEY: chave };
@@ -369,7 +398,7 @@ async function turno(j, texto, anexos) {
   const ev = (x) => enviarEvento(j, x);
   const ac = new AbortController(), uuid = crypto.randomUUID(), geral = config.visual?.geral || {};
   const novo = !j.sessionId;
-  let resposta = "";
+  let resposta = "", erroMostrado = false;
   const prompt = montaPrompt(texto, anexos, uuid);
   const q = query({
     prompt,
@@ -423,7 +452,13 @@ async function turno(j, texto, anexos) {
         // What the last request carried is how full the context is.
         const u = msg.message.usage;
         if (u) contexto = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0);
-        if (msg.error) ev({ tipo: "erro", texto: t("Erro da API: {erro}", { erro: msg.error }) });
+        // Claude Code puts the real reason in the message text; msg.error is
+        // often just "unknown".
+        if (msg.error) {
+          const motivo = msg.message.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+          ev({ tipo: "erro", texto: motivo || t("Erro da API: {erro}", { erro: msg.error }) });
+          erroMostrado = true;
+        }
       } else if (msg.type === "user" && !msg.parent_tool_use_id && Array.isArray(msg.message?.content)) {
         for (const b of msg.message.content) {
           if (b.type === "tool_result") {
@@ -442,7 +477,9 @@ async function turno(j, texto, anexos) {
       }
     }
   } catch (err) {
-    if (!ac.signal.aborted) ev({ tipo: "erro", texto: String(err?.message || err) });
+    // after an API error Claude Code exits with code 1: that says nothing new
+    const saida = /exited with code/i.test(String(err?.message));
+    if (!ac.signal.aborted && !(saida && erroMostrado)) ev({ tipo: "erro", texto: String(err?.message || err) + (saida ? stderrRecente() : "") });
   } finally {
     j.atual = null;
     ev({ tipo: "parado" });
@@ -902,6 +939,13 @@ app.commandLine.appendSwitch("enable-zero-copy");
 // touch the person's settings and can run with the app open.
 if (process.env.VIVO_PASTA || process.env.VIVO_JS) app.setPath("userData", path.join(app.getPath("appData"), process.env.VIVO_PERFIL || "Claudinho-teste"));
 if (!process.env.VIVO_ATALHOS && !app.requestSingleInstanceLock()) app.quit();
+// Last guard: a broken pipe to a Claude Code process only fails that query,
+// it is logged instead of shown. Anything else still gets Electron's dialog.
+process.on("uncaughtException", (e) => {
+  if (["read", "write"].includes(e?.syscall) && ["ENOTCONN", "EPIPE", "ECONNRESET", "EOF"].includes(e?.code)) return console.log("[claude] cano quebrado:", e.code, e.syscall);
+  console.error(e);
+  dialog.showErrorBox(t("Ocorreu um erro no Claudinho"), String(e?.stack || e));
+});
 app.on("second-instance", () => {
   const w = principal?.win; if (!w) return;
   if (w.isMinimized()) w.restore(); w.show(); w.focus();
